@@ -4,6 +4,8 @@ const mockWifiConfigs = {};
 
 const mockState = {
   deviceId: "STM-001",
+  deviceOnline: true,
+  lastSeenTs: Date.now(),
   machineRunning: false,
   selectedMode: "智能模式",
   duration: 20,
@@ -118,6 +120,8 @@ function simulateStatusTick() {
 
   mockState.temperature = Number(Math.min(60, Math.max(10, mockState.temperature)).toFixed(1));
   mockState.humidity = Number(Math.min(95, Math.max(20, mockState.humidity)).toFixed(1));
+  mockState.deviceOnline = true;
+  mockState.lastSeenTs = Date.now();
   mockState.updatedAt = new Date().toISOString();
 }
 

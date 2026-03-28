@@ -172,7 +172,7 @@
               <el-button
                 type="success"
                 link
-                :disabled="!backendOnline || !thresholdChanged"
+                :disabled="!deviceReachable || !thresholdChanged"
                 @click="saveThresholdSettings"
               >
                 同步到消毒机
@@ -186,15 +186,18 @@
               <span class="chip" :class="{ 'chip-alert': hasThresholdAlert }">
                 {{ hasThresholdAlert ? "阈值超限" : "阈值正常" }}
               </span>
-              <span class="chip" :class="{ 'chip-backend-down': !backendOnline }">
-                {{ backendOnline ? "设备在线" : "设备离线" }}
+              <span class="chip" :class="{ 'chip-backend-down': !serverOnline }">
+                {{ serverOnline ? "服务器在线" : "服务器离线" }}
+              </span>
+              <span class="chip" :class="{ 'chip-backend-down': !deviceReachable }">
+                {{ deviceReachable ? "设备在线" : "设备离线" }}
               </span>
             </div>
 
             <div class="action-row">
               <el-button
                 type="primary"
-                :disabled="!backendOnline || doorOpen || machineRunning"
+                :disabled="!deviceReachable || doorOpen || machineRunning"
                 size="large"
                 @click="startDisinfection"
               >
@@ -203,7 +206,7 @@
               <el-button
                 type="warning"
                 plain
-                :disabled="!backendOnline || !machineRunning"
+                :disabled="!deviceReachable || !machineRunning"
                 size="large"
                 @click="togglePause"
               >
@@ -212,7 +215,7 @@
               <el-button
                 type="danger"
                 plain
-                :disabled="!backendOnline || !machineRunning"
+                :disabled="!deviceReachable || !machineRunning"
                 size="large"
                 @click="stopDisinfection"
               >
@@ -238,6 +241,7 @@
             <span class="chip">柜门: {{ doorOpen ? "打开" : "关闭" }}</span>
             <span class="chip">温度阈值: {{ tempLow }}~{{ tempHigh }}°C</span>
             <span class="chip">湿度阈值: {{ humidityLow }}~{{ humidityHigh }}%RH</span>
+            <span v-if="lastSeenLabel" class="chip">最后通信: {{ lastSeenLabel }}</span>
           </div>
           <el-alert
             v-if="hasThresholdAlert"
@@ -340,7 +344,9 @@ export default {
       statusPollingRequestPending: false,
       pollingBoostUntil: 0,
       remainingSeconds: 0,
-      backendOnline: true,
+      serverOnline: true,
+      deviceOnline: false,
+      lastSeenTs: null,
       apiModeText: apiMeta.useMockApi ? "模拟接口" : "服务端",
       isPaused: false,
       wifiDialogVisible: false,
@@ -358,11 +364,17 @@ export default {
     };
   },
   computed: {
+    deviceReachable() {
+      return this.serverOnline && this.deviceOnline;
+    },
+    isServerOffline() {
+      return !this.serverOnline;
+    },
     isDeviceOffline() {
-      return !this.backendOnline;
+      return !this.deviceReachable;
     },
     headerStatusType() {
-      if (this.isDeviceOffline) {
+      if (this.isServerOffline || this.isDeviceOffline) {
         return "info";
       }
 
@@ -373,7 +385,11 @@ export default {
       return "success";
     },
     headerStatusText() {
-      if (this.isDeviceOffline) {
+      if (this.isServerOffline) {
+        return "服务器离线";
+      }
+
+      if (!this.deviceOnline) {
         return "设备离线";
       }
 
@@ -412,7 +428,11 @@ export default {
       return this.runtimeMode || this.selectedMode;
     },
     machineStateText() {
-      if (this.isDeviceOffline) {
+      if (this.isServerOffline) {
+        return "服务器离线";
+      }
+
+      if (!this.deviceOnline) {
         return "设备离线";
       }
 
@@ -436,12 +456,16 @@ export default {
     },
     machineStateDotClass() {
       return {
-        active: this.backendOnline && this.machineRunning,
-        offline: this.isDeviceOffline,
+        active: this.deviceReachable && this.machineRunning,
+        offline: !this.deviceReachable,
       };
     },
     actuatorText() {
-      if (this.isDeviceOffline) {
+      if (this.isServerOffline) {
+        return "服务器离线，当前无法确认设备最新通信状态。";
+      }
+
+      if (!this.deviceOnline) {
         return "设备离线，等待重新连接后再同步设备状态。";
       }
 
@@ -456,7 +480,11 @@ export default {
       return `加热:${this.heaterOn ? "开启" : "关闭"} / 消毒灯:${this.disinfectionOn ? "开启" : "关闭"} / 风扇:${this.fanOn ? "开启" : "关闭"}`;
     },
     statusText() {
-      if (this.isDeviceOffline) {
+      if (this.isServerOffline) {
+        return "服务器已离线，前端暂时无法确认设备与服务器的最新通信状态。";
+      }
+
+      if (!this.deviceOnline) {
         return "设备已离线，页面会保留上一次配置，待设备重新连接后自动更新最新运行状态。";
       }
 
@@ -477,6 +505,18 @@ export default {
       }
 
       return `设备空闲，可远程下发任务（${this.apiModeText}）。`;
+    },
+    lastSeenLabel() {
+      if (!this.lastSeenTs) {
+        return "";
+      }
+
+      const lastSeen = new Date(this.lastSeenTs);
+      if (Number.isNaN(lastSeen.getTime())) {
+        return "";
+      }
+
+      return lastSeen.toLocaleString("zh-CN", { hour12: false });
     },
   },
   watch: {
@@ -514,6 +554,19 @@ export default {
   methods: {
     resolveErrorMessage(error) {
       return error?.message || "服务端未响应";
+    },
+    ensureDeviceReachable(actionText) {
+      if (!this.serverOnline) {
+        ElMessage.warning(`服务器离线，无法${actionText}。`);
+        return false;
+      }
+
+      if (!this.deviceOnline) {
+        ElMessage.warning(`设备离线，无法${actionText}。`);
+        return false;
+      }
+
+      return true;
     },
     getWifiStorageKey(deviceId = this.selectedDeviceId) {
       return `stm32-smart-disinfector:wifi:${deviceId}`;
@@ -581,7 +634,7 @@ export default {
         return 500;
       }
 
-      if (this.machineRunning) {
+      if (this.deviceReachable && this.machineRunning) {
         return 1000;
       }
 
@@ -617,6 +670,10 @@ export default {
 
       const shouldSyncControls = options.syncControls === true;
 
+      this.deviceOnline = typeof state.deviceOnline === "boolean"
+        ? state.deviceOnline
+        : this.deviceOnline;
+      this.lastSeenTs = state.lastSeenTs ?? this.lastSeenTs;
       this.machineRunning = state.machineRunning ?? this.machineRunning;
       this.runtimeMode = state.selectedMode || this.runtimeMode;
       this.runtimeDuration = state.duration ?? this.runtimeDuration;
@@ -647,7 +704,7 @@ export default {
           return;
         }
 
-        this.backendOnline = true;
+        this.serverOnline = true;
         this.applyBackendState(response.data, options);
         if (options.syncControls) {
           this.lastSavedThresholds = {
@@ -658,7 +715,7 @@ export default {
           };
         }
       } catch (error) {
-        this.backendOnline = false;
+        this.serverOnline = false;
         if (!apiMeta.useMockApi) {
           ElMessage.warning(this.resolveErrorMessage(error));
         }
@@ -677,17 +734,16 @@ export default {
           return;
         }
 
-        this.backendOnline = true;
+        this.serverOnline = true;
         this.applyBackendState(response.data, options);
       } catch (error) {
-        this.backendOnline = false;
+        this.serverOnline = false;
       } finally {
         this.statusPollingRequestPending = false;
       }
     },
     async saveThresholdSettings() {
-      if (!this.backendOnline) {
-        ElMessage.warning("设备离线，暂时无法同步阈值。");
+      if (!this.ensureDeviceReachable("同步阈值")) {
         return;
       }
 
@@ -702,7 +758,7 @@ export default {
           ElMessage.warning(response.message || "阈值保存失败");
           return;
         }
-        this.backendOnline = true;
+        this.serverOnline = true;
         this.applyBackendState(response.data, { syncControls: true });
         this.lastSavedThresholds = {
           tempLow: this.tempLow,
@@ -713,7 +769,7 @@ export default {
         this.boostStatusPolling(3000);
         ElMessage.success("阈值已保存。");
       } catch (error) {
-        this.backendOnline = false;
+        this.serverOnline = false;
         ElMessage.warning(this.resolveErrorMessage(error));
       }
     },
@@ -746,9 +802,11 @@ export default {
           return;
         }
 
+        this.serverOnline = true;
         this.wifiDialogVisible = false;
         ElMessage.success(`已保存 ${this.selectedDeviceId} 的 WiFi 配置，重启设备后生效。`);
       } catch (error) {
+        this.serverOnline = false;
         ElMessage.warning(this.resolveErrorMessage(error));
       } finally {
         this.wifiSaving = false;
@@ -824,8 +882,7 @@ export default {
       }, 1000);
     },
     async startDisinfection() {
-      if (!this.backendOnline) {
-        ElMessage.warning("设备离线，无法启动任务。");
+      if (!this.ensureDeviceReachable("启动任务")) {
         return;
       }
 
@@ -846,15 +903,15 @@ export default {
           },
         });
         if (response.code && response.code !== 0) {
-          this.backendOnline = true;
+          this.serverOnline = true;
           ElMessage.warning(response.message || "启动失败");
           return;
         }
-        this.backendOnline = true;
+        this.serverOnline = true;
         this.applyBackendState(response.data);
         this.boostStatusPolling();
       } catch (error) {
-        this.backendOnline = false;
+        this.serverOnline = false;
         ElMessage.warning(this.resolveErrorMessage(error));
         return;
       }
@@ -871,8 +928,7 @@ export default {
       ElMessage.success(`已启动${this.selectedMode}，时长 ${this.duration} 分钟。`);
     },
     async togglePause() {
-      if (!this.backendOnline) {
-        ElMessage.warning("设备离线，无法执行暂停或继续。");
+      if (!this.ensureDeviceReachable(this.isPaused ? "继续任务" : "暂停任务")) {
         return;
       }
 
@@ -888,11 +944,11 @@ export default {
           ElMessage.warning(response.message || "暂停/继续失败");
           return;
         }
-        this.backendOnline = true;
+        this.serverOnline = true;
         this.applyBackendState(response.data);
         this.boostStatusPolling();
       } catch (error) {
-        this.backendOnline = false;
+        this.serverOnline = false;
         ElMessage.warning(this.resolveErrorMessage(error));
         return;
       }
@@ -905,23 +961,22 @@ export default {
       ElMessage.success("任务已继续执行。");
     },
     async stopDisinfection(byTimer = false) {
-      if (!this.backendOnline) {
-        ElMessage.warning("设备离线，无法停止任务。");
+      if (!this.ensureDeviceReachable("停止任务")) {
         return;
       }
 
       try {
         const response = await disinfectorApi.stopTask(this.selectedDeviceId);
         if (response.code && response.code !== 0) {
-          this.backendOnline = true;
+          this.serverOnline = true;
           ElMessage.warning(response.message || "停止失败");
           return;
         }
-        this.backendOnline = true;
+        this.serverOnline = true;
         this.applyBackendState(response.data);
         this.boostStatusPolling();
       } catch (error) {
-        this.backendOnline = false;
+        this.serverOnline = false;
         ElMessage.warning(this.resolveErrorMessage(error));
         return;
       }
